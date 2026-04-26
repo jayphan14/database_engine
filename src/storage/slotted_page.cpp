@@ -11,6 +11,12 @@ uint16_t loadU16(const char* p) {
     return v;
 }
 
+uint32_t loadU32(const char* p) {
+    uint32_t v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 void storeU16(char* p, uint16_t v) {
     std::memcpy(p, &v, sizeof(v));
 }
@@ -21,10 +27,13 @@ void storeU32(char* p, uint32_t v) {
 
 }  // namespace
 
-uint16_t SlottedPage::numSlotsRaw() const     { return loadU16(data_ + 4); }
-void     SlottedPage::setNumSlots(uint16_t v) { storeU16(data_ + 4, v); }
-uint16_t SlottedPage::freeSpaceOffset() const { return loadU16(data_ + 6); }
-void     SlottedPage::setFreeSpaceOffset(uint16_t v) { storeU16(data_ + 6, v); }
+uint16_t SlottedPage::numSlotsRaw() const     { return loadU16(data_ + 8); }
+void     SlottedPage::setNumSlots(uint16_t v) { storeU16(data_ + 8, v); }
+uint16_t SlottedPage::freeSpaceOffset() const { return loadU16(data_ + 10); }
+void     SlottedPage::setFreeSpaceOffset(uint16_t v) { storeU16(data_ + 10, v); }
+
+PageId SlottedPage::nextPageId() const          { return loadU32(data_ + 4); }
+void   SlottedPage::setNextPageId(PageId next)  { storeU32(data_ + 4, next); }
 
 SlottedPage::SlotEntry SlottedPage::readSlot(SlotId i) const {
     const char* p = data_ + HEADER_SIZE + static_cast<size_t>(i) * SLOT_SIZE;
@@ -60,6 +69,7 @@ size_t SlottedPage::deadTupleBytes() const {
 
 void SlottedPage::init() {
     storeU32(data_ + 0, 0);                           // lsn
+    storeU32(data_ + 4, INVALID_PAGE_ID);             // next_page_id
     setNumSlots(0);
     setFreeSpaceOffset(static_cast<uint16_t>(PAGE_SIZE));
     // Zero the rest of the page so reads from uninitialized regions are

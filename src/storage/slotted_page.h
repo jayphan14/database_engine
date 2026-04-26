@@ -35,7 +35,12 @@ using SlotId = uint16_t;
 class SlottedPage {
 public:
     // Number of bytes the header occupies at the start of the page.
-    static constexpr size_t HEADER_SIZE = 8;
+    // Layout:
+    //   [0..4)  lsn               (uint32, reserved for recovery)
+    //   [4..8)  next_page_id      (PageId, INVALID_PAGE_ID for the chain tail)
+    //   [8..10) num_slots         (uint16)
+    //   [10..12) free_space_offset (uint16)
+    static constexpr size_t HEADER_SIZE = 12;
 
     // Number of bytes per slot entry in the slot array.
     static constexpr size_t SLOT_SIZE = 4;
@@ -81,13 +86,16 @@ public:
     // insert without a free tombstone would receive slot id `numSlots()`.
     size_t numSlots() const;
 
+    // Page-chain pointer used by higher layers (HeapFile) to link pages.
+    // Lives in the page header so it persists with the page bytes.
+    // INVALID_PAGE_ID marks the tail of the chain.
+    PageId nextPageId() const;
+    void setNextPageId(PageId next);
+
 private:
     char* data_;
 
-    // Header field accessors. The header lives at offset 0 with layout:
-    //   [0..4) lsn (uint32_t, currently always 0; reserved for recovery)
-    //   [4..6) num_slots (uint16_t)
-    //   [6..8) free_space_offset (uint16_t) — where the next tuple goes
+    // Header field accessors. See HEADER_SIZE comment for layout.
     uint16_t numSlotsRaw() const;
     void setNumSlots(uint16_t v);
     uint16_t freeSpaceOffset() const;

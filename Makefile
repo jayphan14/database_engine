@@ -8,10 +8,13 @@ TEST_OBJS = $(BUILD_DIR)/tests/test_parser.o \
             $(BUILD_DIR)/tests/storage/test_disk_manager.o \
             $(BUILD_DIR)/tests/storage/test_buffer_pool.o \
             $(BUILD_DIR)/tests/storage/test_slotted_page.o \
+            $(BUILD_DIR)/tests/storage/test_heap_file.o \
+            $(BUILD_DIR)/tests/storage/test_integration.o \
             $(BUILD_DIR)/src/parser.o \
             $(BUILD_DIR)/src/storage/disk_manager.o \
             $(BUILD_DIR)/src/storage/buffer_pool.o \
-            $(BUILD_DIR)/src/storage/slotted_page.o
+            $(BUILD_DIR)/src/storage/slotted_page.o \
+            $(BUILD_DIR)/src/storage/heap_file.o
 
 dbms: $(DBMS_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
