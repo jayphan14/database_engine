@@ -72,17 +72,18 @@ public:
     Frame* get()        const { return frame_; }
 
     // Mark the page as modified so the buffer pool writes it back before
-    // evicting (or on flush). Call this whenever you mutate `data`. Idempotent.
-    void markDirty() { dirty_ = true; }
+    // evicting (or on flush). Call this whenever you mutate `data`.
+    // Sets Frame::is_dirty immediately, so a subsequent flushAll() observes
+    // the page as dirty even before this guard goes out of scope. Idempotent.
+    void markDirty() { if (frame_) frame_->is_dirty = true; }
 
 private:
     friend class BufferPool;
     PageGuard(BufferPool* bp, Frame* frame) noexcept
-        : bp_(bp), frame_(frame), dirty_(false) {}
+        : bp_(bp), frame_(frame) {}
 
     BufferPool* bp_ = nullptr;
     Frame* frame_ = nullptr;
-    bool dirty_ = false;
 };
 
 class BufferPool {

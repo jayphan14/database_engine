@@ -2,10 +2,14 @@
 
 #include "src/storage/buffer_pool.h"
 #include "src/storage/disk_manager.h"
+#include "src/storage/slotted_page.h"
 #include "tests/test_util.h"
 
 #include <cstring>
+#include <map>
+#include <random>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -378,4 +382,154 @@ TEST_CASE("pinNew returns a guard for a freshly allocated zeroed page") {
     std::vector<char> buf(PAGE_SIZE);
     dm.readPage(pid, buf.data());
     CHECK(std::memcmp(buf.data(), makePattern(0x77).data(), PAGE_SIZE) == 0);
+}
+
+TEST_CASE("constructor rejects num_frames == 0") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    CHECK_THROWS_AS(BufferPool(0, &dm), std::runtime_error);
+}
+
+TEST_CASE("constructor rejects null DiskManager") {
+    CHECK_THROWS_AS(BufferPool(4, nullptr), std::runtime_error);
+}
+
+TEST_CASE("a 1-frame pool still functions") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    seedPages(dm, 3);
+
+    BufferPool bp(1, &dm);
+    Frame* f0 = bp.fetchPage(0);
+    CHECK(std::memcmp(f0->data, makePattern(0x10).data(), PAGE_SIZE) == 0);
+    bp.unpinPage(0, false);
+
+    // Each subsequent fetch evicts the only frame.
+    Frame* f1 = bp.fetchPage(1);
+    CHECK(std::memcmp(f1->data, makePattern(0x11).data(), PAGE_SIZE) == 0);
+    bp.unpinPage(1, false);
+
+    Frame* f2 = bp.fetchPage(2);
+    CHECK(std::memcmp(f2->data, makePattern(0x12).data(), PAGE_SIZE) == 0);
+    bp.unpinPage(2, false);
+}
+
+TEST_CASE("eviction order tracks the LRU recency of unpins") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    seedPages(dm, 4);
+
+    BufferPool bp(3, &dm);
+
+    // Touch order: 0, 1, 2 (LRU = 0 after this round of unpins).
+    bp.fetchPage(0); bp.unpinPage(0, false);
+    bp.fetchPage(1); bp.unpinPage(1, false);
+    bp.fetchPage(2); bp.unpinPage(2, false);
+
+    // Re-touch 0 — now LRU should be 1, not 0.
+    bp.fetchPage(0); bp.unpinPage(0, false);
+
+    // Fetching 3 should evict 1 (the LRU). 0 and 2 must still be cache hits.
+    bp.fetchPage(3); bp.unpinPage(3, false);
+
+    Frame* f0 = bp.fetchPage(0);
+    CHECK(std::memcmp(f0->data, makePattern(0x10).data(), PAGE_SIZE) == 0);
+    bp.unpinPage(0, false);
+
+    Frame* f2 = bp.fetchPage(2);
+    CHECK(std::memcmp(f2->data, makePattern(0x12).data(), PAGE_SIZE) == 0);
+    bp.unpinPage(2, false);
+}
+
+TEST_CASE("newPage evicts an unpinned frame when the pool is full") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    seedPages(dm, 2);
+
+    BufferPool bp(2, &dm);
+    bp.fetchPage(0); bp.unpinPage(0, false);
+    bp.fetchPage(1); bp.unpinPage(1, false);
+
+    PageId new_pid = INVALID_PAGE_ID;
+    Frame* f = bp.newPage(&new_pid);
+    REQUIRE(f != nullptr);
+    CHECK(new_pid == 2);
+    CHECK(f->page_id == 2);
+    CHECK(f->pin_count == 1);
+    bp.unpinPage(new_pid, false);
+}
+
+TEST_CASE("newPage throws when every frame is pinned") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    seedPages(dm, 2);
+
+    BufferPool bp(2, &dm);
+    bp.fetchPage(0);
+    bp.fetchPage(1);
+
+    PageId out;
+    CHECK_THROWS_AS(bp.newPage(&out), std::runtime_error);
+
+    bp.unpinPage(0, false);
+    bp.unpinPage(1, false);
+}
+
+TEST_CASE("flushPage on a page not in the pool is a silent no-op") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    seedPages(dm, 1);
+
+    BufferPool bp(2, &dm);
+    // Not cached at all — must not throw.
+    bp.flushPage(0);
+    bp.flushPage(99);
+}
+
+TEST_CASE("integration: many tuples across many pages with heavy eviction") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+
+    constexpr int kPages   = 6;
+    constexpr int kPerPage = 8;
+    std::map<std::pair<PageId, SlotId>, std::vector<char>> model;
+    std::vector<PageId> page_ids;
+
+    {
+        // Tiny pool relative to working set forces lots of eviction traffic.
+        BufferPool bp(2, &dm);
+        std::mt19937 rng(1234);
+        std::uniform_int_distribution<int> len_dist(1, 80);
+        std::uniform_int_distribution<int> byte_dist(0, 255);
+
+        for (int p = 0; p < kPages; ++p) {
+            PageGuard g = bp.pinNew();
+            page_ids.push_back(g->page_id);
+
+            SlottedPage sp(g->data);
+            sp.init();
+
+            for (int t = 0; t < kPerPage; ++t) {
+                std::vector<char> data(len_dist(rng));
+                for (auto& c : data) c = static_cast<char>(byte_dist(rng));
+                auto sid = sp.insert(data.data(), data.size());
+                REQUIRE(sid);
+                model[{g->page_id, *sid}] = std::move(data);
+            }
+            g.markDirty();
+        }
+        bp.flushAll();
+    }
+
+    // Reopen everything fresh and verify each tuple is exactly recoverable.
+    DiskManager dm2(tf.path());
+    BufferPool bp(2, &dm2);
+    for (const auto& [key, expected] : model) {
+        PageGuard g = bp.pin(key.first);
+        SlottedPage sp(g->data);
+        auto [p, len] = sp.get(key.second);
+        REQUIRE(p != nullptr);
+        REQUIRE(len == expected.size());
+        REQUIRE(std::memcmp(p, expected.data(), len) == 0);
+    }
 }

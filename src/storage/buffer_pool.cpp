@@ -148,29 +148,27 @@ PageGuard BufferPool::pinNew() {
 
 PageGuard::~PageGuard() {
     if (frame_ && bp_) {
-        bp_->unpinPage(frame_->page_id, dirty_);
+        // Frame::is_dirty was already set by markDirty() (if at all), so the
+        // unpin call doesn't need to OR in any additional bit.
+        bp_->unpinPage(frame_->page_id, false);
     }
 }
 
 PageGuard::PageGuard(PageGuard&& other) noexcept
-    : bp_(other.bp_), frame_(other.frame_), dirty_(other.dirty_) {
+    : bp_(other.bp_), frame_(other.frame_) {
     other.bp_ = nullptr;
     other.frame_ = nullptr;
-    other.dirty_ = false;
 }
 
 PageGuard& PageGuard::operator=(PageGuard&& other) noexcept {
     if (this != &other) {
-        // Unpin our current page (if any) before taking over `other`'s state.
         if (frame_ && bp_) {
-            bp_->unpinPage(frame_->page_id, dirty_);
+            bp_->unpinPage(frame_->page_id, false);
         }
         bp_ = other.bp_;
         frame_ = other.frame_;
-        dirty_ = other.dirty_;
         other.bp_ = nullptr;
         other.frame_ = nullptr;
-        other.dirty_ = false;
     }
     return *this;
 }

@@ -7,9 +7,11 @@ DBMS_OBJS = $(BUILD_DIR)/main.o $(BUILD_DIR)/src/parser.o
 TEST_OBJS = $(BUILD_DIR)/tests/test_parser.o \
             $(BUILD_DIR)/tests/storage/test_disk_manager.o \
             $(BUILD_DIR)/tests/storage/test_buffer_pool.o \
+            $(BUILD_DIR)/tests/storage/test_slotted_page.o \
             $(BUILD_DIR)/src/parser.o \
             $(BUILD_DIR)/src/storage/disk_manager.o \
-            $(BUILD_DIR)/src/storage/buffer_pool.o
+            $(BUILD_DIR)/src/storage/buffer_pool.o \
+            $(BUILD_DIR)/src/storage/slotted_page.o
 
 dbms: $(DBMS_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^

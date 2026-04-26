@@ -4,6 +4,7 @@
 #include "tests/test_util.h"
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -114,4 +115,52 @@ TEST_CASE("opening a file whose size is not a multiple of PAGE_SIZE throws") {
     }
 
     CHECK_THROWS_AS(DiskManager dm(tf.path()), std::runtime_error);
+}
+
+TEST_CASE("file size on disk grows by exactly PAGE_SIZE per allocatePage") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+
+    CHECK(std::filesystem::file_size(tf.path()) == 0);
+    dm.allocatePage();
+    CHECK(std::filesystem::file_size(tf.path()) == PAGE_SIZE);
+    dm.allocatePage();
+    dm.allocatePage();
+    CHECK(std::filesystem::file_size(tf.path()) == 3 * PAGE_SIZE);
+}
+
+TEST_CASE("read/write round trips on the highest valid page id") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+
+    for (int i = 0; i < 5; ++i) dm.allocatePage();
+    CHECK(dm.numPages() == 5);
+
+    const PageId top = dm.numPages() - 1;
+    std::vector<char> buf(PAGE_SIZE, 'Z');
+    dm.writePage(top, buf.data());
+
+    std::vector<char> got(PAGE_SIZE);
+    dm.readPage(top, got.data());
+    CHECK(std::memcmp(got.data(), buf.data(), PAGE_SIZE) == 0);
+}
+
+TEST_CASE("stress: 50 pages with distinct patterns round-trip correctly") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+
+    constexpr int N = 50;
+    for (int i = 0; i < N; ++i) {
+        const PageId pid = dm.allocatePage();
+        const auto pat = makePattern(static_cast<uint8_t>(i));
+        dm.writePage(pid, pat.data());
+    }
+    CHECK(dm.numPages() == N);
+
+    std::vector<char> buf(PAGE_SIZE);
+    for (int i = 0; i < N; ++i) {
+        dm.readPage(static_cast<PageId>(i), buf.data());
+        const auto pat = makePattern(static_cast<uint8_t>(i));
+        REQUIRE(std::memcmp(buf.data(), pat.data(), PAGE_SIZE) == 0);
+    }
 }
