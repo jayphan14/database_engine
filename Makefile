@@ -1,16 +1,29 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2
+CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I.
 
-dbms: main.o parser.o
-	$(CXX) $(CXXFLAGS) -o dbms main.o parser.o
+BUILD_DIR = build
 
-%.o: %.cpp parser.h
-	$(CXX) $(CXXFLAGS) -c $<
+DBMS_OBJS = $(BUILD_DIR)/main.o $(BUILD_DIR)/src/parser.o
+TEST_OBJS = $(BUILD_DIR)/tests/test_parser.o $(BUILD_DIR)/src/parser.o
+
+dbms: $(DBMS_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(BUILD_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 run: dbms
 	./dbms
 
-clean:
-	rm -f *.o dbms
+test: $(BUILD_DIR)/run_tests
+	$<
 
-.PHONY: run clean
+$(BUILD_DIR)/run_tests: $(TEST_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+clean:
+	rm -rf $(BUILD_DIR) dbms
+
+.PHONY: run test clean

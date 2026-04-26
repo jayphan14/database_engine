@@ -9,6 +9,9 @@
 # Binary
 /dbms
 
+# Build output dir
+/build/
+
 # Editor / OS
 .DS_Store
 .vscode/
