@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+
+# Binary
+/dbms
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
