@@ -62,3 +62,7 @@ Each layer has its own test file under `tests/storage/`. The end-to-end
 persistence test lives in `tests/storage/test_integration.cpp` (loads 1000
 rows, simulates a program restart by destroying every storage object, then
 scans the rows back).
+
+
+## Data flow
+![alt text](image.png)
