@@ -57,6 +57,13 @@ struct Value {
 bool operator==(const Value& a, const Value& b);
 inline bool operator!=(const Value& a, const Value& b) { return !(a == b); }
 
+// Stable on-disk integer encoding of a Type, used anywhere the type
+// itself needs to be persisted (the catalog's __columns table is the
+// current consumer). The numeric values are part of the file format —
+// never reorder or reuse them.
+int32_t typeToCode(Type t);
+Type    typeFromCode(int32_t c);
+
 // Stateless codec converting a row of Values to/from the byte sequence
 // stored in a SlottedPage's tuple area. Layout:
 //

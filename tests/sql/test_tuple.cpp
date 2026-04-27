@@ -134,6 +134,14 @@ TEST_CASE("encode rejects null in a non-nullable column") {
     CHECK_THROWS_AS(TupleCodec::encode(s, {Value::Null(Type::Int32)}), std::runtime_error);
 }
 
+TEST_CASE("typeToCode and typeFromCode round trip every Type and reject garbage") {
+    for (Type t : {Type::Int32, Type::Int64, Type::Bool, Type::Text}) {
+        CHECK(typeFromCode(typeToCode(t)) == t);
+    }
+    CHECK_THROWS_AS(typeFromCode(99), std::runtime_error);
+    CHECK_THROWS_AS(typeFromCode(-1), std::runtime_error);
+}
+
 TEST_CASE("tupleSize is undefined when the schema contains Text columns") {
     // tupleSize is for fixed-only schemas; Text is variable-length, so its
     // size depends on the actual values. Throw rather than guess.

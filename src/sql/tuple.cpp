@@ -76,6 +76,28 @@ Value Value::Null(Type t) {
     return r;
 }
 
+int32_t typeToCode(Type t) {
+    switch (t) {
+        case Type::Int32: return 0;
+        case Type::Int64: return 1;
+        case Type::Bool:  return 2;
+        case Type::Text:  return 3;
+    }
+    throw std::runtime_error("typeToCode: unknown Type");
+}
+
+Type typeFromCode(int32_t c) {
+    switch (c) {
+        case 0: return Type::Int32;
+        case 1: return Type::Int64;
+        case 2: return Type::Bool;
+        case 3: return Type::Text;
+        default:
+            throw std::runtime_error("typeFromCode: invalid type code " +
+                                     std::to_string(c));
+    }
+}
+
 bool operator==(const Value& a, const Value& b) {
     if (a.type != b.type) return false;
     if (a.is_null != b.is_null) return false;
