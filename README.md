@@ -1,9 +1,18 @@
 # database_engine
 
 A small disk-backed database engine in C++17. The project is being built
-bottom-up — page-level storage first, then a tuple/catalog layer, then the
-SQL front end. There is no executor yet; the front end stops at a typed,
-name-resolved AST.
+bottom-up: page-level storage first, then a tuple/catalog layer, then the
+SQL front end (parser → analyzer), then a planner that lowers the bound
+AST into a tree of Volcano-style operators, and finally an executor that
+drives that tree to produce rows.
+
+```
+SQL string
+  → Parser     → SelectQuery        (string-based AST)
+  → Analyzer   → BoundSelect        (numeric indices + types)
+  → Planner    → PlanNode tree      (SeqScan / NestedLoopJoin / Filter)
+  → Executor   → ExecResult         (rows of Values)
+```
 
 ## What's implemented
 
@@ -42,6 +51,27 @@ A four-layer stack on a single file of fixed-size 4 KiB pages:
   AST, but with strings replaced by `(table_index, column_index)` pairs
   and every node carrying a `result_type`). Throws on name-resolution
   failure or type mismatch.
+- **`plan_node.{h,cpp}`** — the `PlanNode` interface (Volcano-style:
+  `open() / next() / close() / describe()`) and the wide-row
+  `ExecRow = vector<vector<Value>>` shape every operator emits. Plus
+  free `evalExpr` / `evalBinaryOp` for use by Filter and projection.
+- **`operators.{h,cpp}`** — three concrete `PlanNode`s:
+  - `SeqScan` — walks one heap file, decodes each tuple, populates
+    its assigned slot in the wide row.
+  - `NestedLoopJoin` — materializes the right child on `open()`,
+    nested-loops over (left × right), overlays the two children's
+    disjoint slots, emits combined rows where the ON predicate holds.
+  - `Filter` — pulls from its child until the predicate is true.
+- **`planner.{h,cpp}`** — `Planner::plan(BoundSelect&)`: a 1:1 lowering
+  to a left-deep operator tree (outer `SeqScan`, then a stack of
+  `NestedLoopJoin`s, then an optional `Filter` on top). No
+  alternatives yet — when there are (hash join, index scan, predicate
+  pushdown), this is the seam where an optimizer plugs in.
+- **`executor.{h,cpp}`** — thin coordinator. Builds the plan, drives
+  `root->open() / next() / close()`, applies the SELECT list to each
+  wide row to produce a flat-row `ExecResult { column_names,
+  column_types, rows }`. `execute(BoundSelect bs)` consumes its
+  argument because the planner moves the WHERE expression out.
 
 ### Parser (`src/parser.{h,cpp}`)
 
@@ -73,9 +103,17 @@ twice in one query.
 
 ### What's not built yet
 
-- An executor / query plan. Nothing runs a `BoundSelect` against the
-  storage stack — the demo seeds and scans heap files directly.
-- DML (`INSERT` / `UPDATE` / `DELETE`) at the SQL surface.
+- DML (`INSERT` / `UPDATE` / `DELETE`) at the SQL surface — rows are
+  inserted today via `HeapFile::insert` + `TupleCodec::encode`, not SQL.
+- `ORDER BY`, `LIMIT`, aggregates, expressions in the SELECT list, and
+  table aliases.
+- Alternative operators (`HashJoin`, `IndexScan`, ...) and a real
+  optimizer that picks between them. The plan tree is now a data
+  structure, so these slot in as new `PlanNode` subclasses plus
+  rewrite passes — but neither exists yet. The current planner does a
+  fixed 1:1 lowering.
+- `EXPLAIN` at the SQL surface. Operators already have a `describe()`
+  method, so it's a thin addition once we want to wire it up.
 - Indexes, transactions, recovery, concurrency control.
 
 ## Requirements
@@ -97,15 +135,15 @@ Run the demo (`main.cpp`):
 ./dbms
 ```
 
-`main.cpp` toggles between two demos:
+`main.cpp` is one end-to-end flow that exercises every layer:
 
-- **Parser demo** — parses a handful of example queries (including joins
-  and a deliberately malformed one) and prints each AST.
-- **Storage demo** — opens a fresh database file, creates a `users`
-  table through the catalog, inserts five rows via `TupleCodec` +
-  `HeapFile`, flushes, then *cold-reopens* the file and scans every row
-  back out using only the catalog bootstrap. This is the end-to-end
-  smoke test for the storage + catalog stack.
+1. open a fresh database file, create the catalog, declare a `users` and
+   a `posts` table;
+2. seed both tables (5 rows each) via `TupleCodec` + `HeapFile`, flush;
+3. *cold-reopen* the file with a brand-new `BufferPool` and `Catalog`;
+4. run a handful of SQL strings (including filters and a join)
+   through Parser → Analyzer → Planner → Executor and print each
+   result as a padded table.
 
 Or do both build + run in one step:
 
@@ -124,8 +162,12 @@ make test
 
 This builds and runs `build/run_tests`, which covers the parser, every
 storage layer (disk manager, buffer pool, slotted page, heap file, plus
-an end-to-end integration test), the tuple codec, the catalog, and the
-analyzer. Pass doctest flags by invoking the binary directly, e.g.:
+an end-to-end integration test), the tuple codec, the catalog, the
+analyzer, the executor (end-to-end SQL → ExecResult cases including a
+cold-reopen), and the operators directly (`SeqScan` / `Filter` /
+`NestedLoopJoin` state machines, empty-input edge cases, and the
+`describe()` EXPLAIN output). Pass doctest flags by invoking the binary
+directly, e.g.:
 
 ```sh
 build/run_tests --help
