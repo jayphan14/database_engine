@@ -169,7 +169,7 @@ tree of strings; **Analyzer** turns strings into integers (against the
 `Catalog`); **Planner** turns the tree into operators; **Executor**
 drives the operators and projects the SELECT list.
 
-### Parser (`src/parser.{h,cpp}`)
+### Parser (`src/sql/parser.{h,cpp}`)
 
 Hand-written recursive-descent parser for a single `SELECT` statement.
 Supported grammar:

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "src/parser.h"
+#include "src/sql/parser.h"
 #include "src/sql/catalog.h"
 #include "src/sql/tuple.h"
 

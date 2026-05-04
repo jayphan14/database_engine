@@ -1,7 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include "vendor/doctest.h"
+#include "tests/vendor/doctest.h"
 
-#include "src/parser.h"
+#include "src/sql/parser.h"
 
 #include <stdexcept>
 #include <string>

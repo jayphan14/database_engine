@@ -1,6 +1,6 @@
 #include "tests/vendor/doctest.h"
 
-#include "src/parser.h"
+#include "src/sql/parser.h"
 #include "src/sql/analyzer.h"
 #include "src/sql/catalog.h"
 #include "src/sql/executor.h"
