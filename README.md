@@ -18,9 +18,33 @@ SQL string
 
 The pieces below are wired end-to-end and exercised by `main.cpp`.
 
-### Storage stack (`src/storage/`)
+### Storage stack (`src/storage/`, plus `tuple` / `catalog` from `src/sql/`)
 
-A four-layer stack on a single file of fixed-size 4 KiB pages:
+A layered stack over a single OS file of fixed-size 4 KiB pages. Each
+layer adds *meaning* over the bytes below; only `DiskManager` ever
+touches the file.
+
+```
+   ┌───────────────────────────────────────────────────┐
+   │ Catalog          name → (schema, root_page)       │
+   │ TupleCodec       Values ↔ bytes (schema-aware)    │
+   ├───────────────────────────────────────────────────┤
+   │ HeapFile         chain of slotted pages           │
+   │ SlottedPage      one page's header + slots + rows │
+   ├───────────────────────────────────────────────────┤
+   │ BufferPool       RAM cache: LRU, pin/dirty bits,  │
+   │                  PageGuard (RAII)                 │
+   ├───────────────────────────────────────────────────┤
+   │ DiskManager      page N ↔ byte offset N × 4096    │
+   └────────────────────────┬──────────────────────────┘
+                            ▼
+                  ┌─────────────────────┐
+                  │   one OS file       │
+                  │   all durable state │
+                  └─────────────────────┘
+```
+
+The four core storage layers, bottom-up:
 
 1. **`DiskManager`** — read/write/allocate raw pages by `PageId`. Page N
    lives at byte offset `N * PAGE_SIZE`. Files only grow.
@@ -34,6 +58,31 @@ A four-layer stack on a single file of fixed-size 4 KiB pages:
 4. **`HeapFile`** — an unordered collection of tuples spread across a
    chain of slotted pages linked by each page's `next_page_id`. Supports
    `insert`, `remove`, point lookup by `RID`, and forward iteration.
+
+After seeding, the demo's database file looks like this on disk:
+
+```
+/tmp/dbms_demo.db   (16 KiB total = 4 pages)
+
+  ┌──────────┬──────────┬──────────┬──────────┐
+  │  page 0  │  page 1  │  page 2  │  page 3  │
+  │ __tables │ __columns│  users   │  posts   │
+  └──────────┴──────────┴──────────┴──────────┘
+   0–4095     4096–8191  8192–12287 12288–16383     (byte offsets)
+
+Each page is a 4 KiB SlottedPage:
+
+  ┌─────────┬─────────────────┬──────────┬───────────────┐
+  │ header  │ slot[0] slot[1] │  ← free  │  … tuples …   │
+  │ ~16 B   │ (grows down)    │          │  (grow up)    │
+  └─────────┴─────────────────┴──────────┴───────────────┘
+```
+
+`__tables` and `__columns` are the catalog's two system tables (rows
+of `(table_id, name, root_page)` and `(table_id, position, name, type,
+nullable)`). They live at hard-coded page IDs so cold-open requires no
+manifest — bootstrap is "open the heap files at pages 0 and 1, walk
+them, rebuild every user table's `TableInfo` in memory."
 
 ### SQL layer (`src/sql/`)
 
@@ -72,6 +121,53 @@ A four-layer stack on a single file of fixed-size 4 KiB pages:
   wide row to produce a flat-row `ExecResult { column_names,
   column_types, rows }`. `execute(BoundSelect bs)` consumes its
   argument because the planner moves the WHERE expression out.
+
+### SQL pipeline — worked example
+
+A query like `SELECT name FROM users WHERE age > 18` flows through four
+stages, each producing a different intermediate representation:
+
+```
+SQL string
+  "SELECT name FROM users WHERE age > 18"
+            │
+            ▼   Parser  (tokenize + recursive-descent)
+            │
+  SelectQuery (string-based AST)
+    table   = "users"
+    columns = ["name"]
+    where   = { column: "age", op: Gt, value: "18" }
+            │
+            ▼   Analyzer  (resolve names against Catalog, type-check)
+            │
+  BoundSelect (numeric indices + types)
+    from_tables = [ users_info ]
+    select_list = [ ColumnRef{0, 1, Text} ]            // "name"
+    where = BinaryOp{
+              Gt,
+              ColumnRef{0, 2, Int32},                  // "age"
+              Literal{18, Int32}
+            }
+            │
+            ▼   Planner  (1:1 lowering to operator tree)
+            │
+  PlanNode tree
+    Filter(age > 18)
+      └── SeqScan(users)
+            │
+            ▼   Executor  (open / next / close, project)
+            │
+            ▼
+  ExecResult
+    column_names = ["name"]
+    column_types = [Text]
+    rows         = [ ["alice"], ["carol"], ["eve"] ]
+```
+
+Every layer's job in one phrase: **Parser** turns characters into a
+tree of strings; **Analyzer** turns strings into integers (against the
+`Catalog`); **Planner** turns the tree into operators; **Executor**
+drives the operators and projects the SELECT list.
 
 ### Parser (`src/parser.{h,cpp}`)
 
