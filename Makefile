@@ -4,6 +4,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -I.
 BUILD_DIR = build
 
 DBMS_OBJS = $(BUILD_DIR)/main.o \
+            $(BUILD_DIR)/src/util/string.o \
             $(BUILD_DIR)/src/sql/parser.o \
             $(BUILD_DIR)/src/storage/disk_manager.o \
             $(BUILD_DIR)/src/storage/buffer_pool.o \
@@ -27,6 +28,7 @@ TEST_OBJS = $(BUILD_DIR)/tests/sql/test_parser.o \
             $(BUILD_DIR)/tests/sql/test_analyzer.o \
             $(BUILD_DIR)/tests/sql/test_executor.o \
             $(BUILD_DIR)/tests/sql/test_operators.o \
+            $(BUILD_DIR)/src/util/string.o \
             $(BUILD_DIR)/src/sql/parser.o \
             $(BUILD_DIR)/src/storage/disk_manager.o \
             $(BUILD_DIR)/src/storage/buffer_pool.o \

@@ -66,17 +66,6 @@ void seedPosts(BufferPool& bp, const Catalog::TableInfo& info) {
     }
 }
 
-std::string valueToString(const Value& v) {
-    if (v.is_null) return "NULL";
-    switch (v.type) {
-        case Type::Int32: return std::to_string(v.i32);
-        case Type::Int64: return std::to_string(v.i64);
-        case Type::Bool:  return v.b ? "true" : "false";
-        case Type::Text:  return v.text;
-    }
-    return "<?>";
-}
-
 void printResult(const ExecResult& r) {
     // Column widths: max of header length and any value length, with a
     // small floor so single-char columns aren't crammed.

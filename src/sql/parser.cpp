@@ -1,5 +1,7 @@
 #include "parser.h"
 
+#include "src/util/string.h"
+
 #include <cctype>
 #include <stdexcept>
 #include <utility>
@@ -14,13 +16,6 @@ const char* opToString(Op op) {
         case Op::Geq: return ">=";
     }
     return "?";
-}
-
-// Used to fold keywords case-insensitively (so `select` and `SELECT` match).
-static std::string toUpper(const std::string& s) {
-    std::string out = s;
-    for (char& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return out;
 }
 
 // Tokenize as soon as constructed
@@ -48,7 +43,7 @@ void Parser::tokenize() {
             size_t start = i;
             while (i < n && isIdentCont(src_[i])) ++i;
             std::string word = src_.substr(start, i - start);
-            std::string upper = toUpper(word);
+            std::string upper = util::toUpper(word);
             if      (upper == "SELECT") tokens_.push_back({Tok::Select, word, Op::Eq});
             else if (upper == "FROM")   tokens_.push_back({Tok::From,   word, Op::Eq});
             else if (upper == "WHERE")  tokens_.push_back({Tok::Where,  word, Op::Eq});

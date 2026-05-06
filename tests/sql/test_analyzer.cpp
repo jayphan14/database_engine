@@ -411,6 +411,297 @@ TEST_CASE("Bare column appearing in two joined tables is ambiguous") {
         std::runtime_error);
 }
 
+// ---- CREATE TABLE ------------------------------------------------------
+
+namespace {
+
+CreateTableStmt parseCreate(const std::string& sql) {
+    Parser p(sql);
+    return std::get<CreateTableStmt>(p.parse());
+}
+
+InsertStmt parseInsertStmt(const std::string& sql) {
+    Parser p(sql);
+    return std::get<InsertStmt>(p.parse());
+}
+
+}  // namespace
+
+TEST_CASE("CREATE TABLE binds every supported type keyword") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    Analyzer az(cat);
+
+    auto b = az.analyze(parseCreate(
+        "CREATE TABLE t (a INT, b INTEGER, c BIGINT, "
+        "d BOOL, e BOOLEAN, f TEXT)"));
+
+    CHECK(b.name == "t");
+    REQUIRE(b.schema.columns.size() == 6);
+    CHECK(b.schema.columns[0].type == Type::Int32);
+    CHECK(b.schema.columns[1].type == Type::Int32);
+    CHECK(b.schema.columns[2].type == Type::Int64);
+    CHECK(b.schema.columns[3].type == Type::Bool);
+    CHECK(b.schema.columns[4].type == Type::Bool);
+    CHECK(b.schema.columns[5].type == Type::Text);
+    // Default nullability is true; analyzer leaves it untouched.
+    for (const auto& c : b.schema.columns) CHECK(c.nullable == true);
+}
+
+TEST_CASE("CREATE TABLE carries NOT NULL through to the bound schema") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    Analyzer az(cat);
+
+    auto b = az.analyze(parseCreate(
+        "CREATE TABLE users (id INT NOT NULL, name TEXT)"));
+
+    CHECK(b.schema.columns[0].nullable == false);
+    CHECK(b.schema.columns[1].nullable == true);
+}
+
+TEST_CASE("CREATE TABLE rejects a duplicate column name") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseCreate(
+        "CREATE TABLE t (a INT, b TEXT, a INT)")), std::runtime_error);
+}
+
+TEST_CASE("CREATE TABLE rejects an unknown type keyword") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseCreate(
+        "CREATE TABLE t (a FLOAT)")), std::runtime_error);
+}
+
+TEST_CASE("CREATE TABLE rejects a name already in the catalog") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseCreate(
+        "CREATE TABLE users (id INT)")), std::runtime_error);
+}
+
+// ---- INSERT ------------------------------------------------------------
+
+TEST_CASE("INSERT without a column list expects schema-order values") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    auto b = az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES "
+        "(1, 'alice', 30, 80000, 1), (2, 'bob', NULL, 60000, 0)"));
+
+    REQUIRE(b.table != nullptr);
+    CHECK(b.table->name == "users");
+    REQUIRE(b.rows.size() == 2);
+    REQUIRE(b.rows[0].size() == 5);
+
+    // Row 0: every cell is non-null and matches the schema.
+    CHECK(b.rows[0][0].i32  == 1);
+    CHECK(b.rows[0][0].type == Type::Int32);
+    CHECK(b.rows[0][1].text == "alice");
+    CHECK(b.rows[0][1].type == Type::Text);
+    CHECK(b.rows[0][2].i32  == 30);
+    CHECK(b.rows[0][3].i64  == 80000);
+    CHECK(b.rows[0][3].type == Type::Int64);
+    CHECK(b.rows[0][4].b    == true);
+    CHECK(b.rows[0][4].type == Type::Bool);
+
+    // Row 1: age is NULL, allowed because usersSchema()'s age is nullable.
+    CHECK(b.rows[1][2].is_null);
+    CHECK(b.rows[1][2].type == Type::Int32);
+    CHECK_FALSE(b.rows[1][0].is_null);
+    CHECK(b.rows[1][4].b == false);
+}
+
+TEST_CASE("INSERT with a column list reorders values into schema order") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    // Listed in (name, salary, active, id) order; missing 'age' which
+    // is nullable and so should default to NULL.
+    auto b = az.analyze(parseInsertStmt(
+        "INSERT INTO users (name, salary, active, id) "
+        "VALUES ('alice', 80000, 1, 1)"));
+
+    REQUIRE(b.rows.size() == 1);
+    REQUIRE(b.rows[0].size() == 5);
+    // Schema order: id, name, age, salary, active
+    CHECK(b.rows[0][0].i32  == 1);
+    CHECK(b.rows[0][1].text == "alice");
+    CHECK(b.rows[0][2].is_null);
+    CHECK(b.rows[0][2].type == Type::Int32);
+    CHECK(b.rows[0][3].i64  == 80000);
+    CHECK(b.rows[0][4].b    == true);
+}
+
+TEST_CASE("INSERT with too few values throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES (1, 'alice')")), std::runtime_error);
+}
+
+TEST_CASE("INSERT with too many values throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES (1, 'alice', 30, 80000, 1, 'extra')")),
+        std::runtime_error);
+}
+
+TEST_CASE("INSERT NULL for a non-nullable column throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    // 'id' is non-nullable in usersSchema().
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES (NULL, 'alice', 30, 80000, 1)")),
+        std::runtime_error);
+}
+
+TEST_CASE("INSERT omitting a non-nullable column throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    // 'id' is non-nullable; column list leaves it out, so the analyzer
+    // would fill it with NULL — which is rejected.
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users (name, age, salary, active) "
+        "VALUES ('alice', 30, 80000, 1)")), std::runtime_error);
+}
+
+TEST_CASE("INSERT into an unknown table throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO ghosts VALUES (1)")), std::runtime_error);
+}
+
+TEST_CASE("INSERT with an unknown column name throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users (nope) VALUES (1)")), std::runtime_error);
+}
+
+TEST_CASE("INSERT with a duplicate column in the list throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users (id, id) VALUES (1, 2)")), std::runtime_error);
+}
+
+TEST_CASE("INSERT with a string literal into an Int32 column throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES ('not-an-int', 'alice', 30, 80000, 1)")),
+        std::runtime_error);
+}
+
+TEST_CASE("INSERT with a number that overflows Int32 throws") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    CHECK_THROWS_AS(az.analyze(parseInsertStmt(
+        "INSERT INTO users VALUES (9999999999, 'alice', 30, 80000, 1)")),
+        std::runtime_error);
+}
+
+// ---- analyzeStatement dispatch ----------------------------------------
+
+TEST_CASE("analyzeStatement returns the matching bound variant") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(4, &dm);
+    Catalog cat = Catalog::create(&bp);
+    cat.createTable("users", usersSchema());
+    Analyzer az(cat);
+
+    {
+        Parser p("SELECT * FROM users");
+        auto b = az.analyzeStatement(p.parse());
+        CHECK(std::holds_alternative<BoundSelect>(b));
+    }
+    {
+        Parser p("CREATE TABLE t (a INT)");
+        auto b = az.analyzeStatement(p.parse());
+        CHECK(std::holds_alternative<BoundCreateTable>(b));
+    }
+    {
+        Parser p("INSERT INTO users VALUES (1, 'a', 30, 80000, 1)");
+        auto b = az.analyzeStatement(p.parse());
+        CHECK(std::holds_alternative<BoundInsert>(b));
+    }
+}
+
 TEST_CASE("Multiple chained JOINs all resolve") {
     TempFile tf;
     DiskManager dm(tf.path());
