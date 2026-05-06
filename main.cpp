@@ -14,6 +14,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 // =============================================================================
@@ -121,9 +122,17 @@ void runQuery(const Catalog& cat, BufferPool& bp, const std::string& sql) {
     std::cout << "\nSQL: " << sql << "\n";
     try {
         Parser p(sql);
-        SelectQuery q = p.parse();
+        Statement stmt = p.parse();
+        // Demo only exercises SELECT today — DDL/DML are wired through
+        // the catalog directly during seeding. Once the analyzer/executor
+        // grow CREATE TABLE / INSERT support, this dispatch grows too.
+        const auto* q = std::get_if<SelectQuery>(&stmt);
+        if (q == nullptr) {
+            std::cout << "  error: only SELECT is wired through the executor\n";
+            return;
+        }
         Analyzer az(cat);
-        BoundSelect bs = az.analyze(q);
+        BoundSelect bs = az.analyze(*q);
         Executor ex(&bp);
         ExecResult r = ex.execute(std::move(bs));
         printResult(r);

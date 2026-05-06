@@ -35,7 +35,7 @@ Schema postsSchema() {
 // Convenience: parse + analyze in one go.
 BoundSelect parseAnalyze(const Analyzer& az, const std::string& sql) {
     Parser p(sql);
-    SelectQuery q = p.parse();
+    SelectQuery q = std::get<SelectQuery>(p.parse());
     return az.analyze(q);
 }
 

@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 // Comparison operators allowed in a WHERE clause.
@@ -40,21 +41,65 @@ struct SelectQuery {
     std::optional<Condition> where;
 };
 
-// Parses a single SELECT statement from a SQL string.
-// Construction tokenizes; parse() walks the tokens to produce a SelectQuery.
+// One column declaration inside a CREATE TABLE column list.
+// `type_name` is the surface keyword as written (e.g. "INT", "BIGINT",
+// "TEXT") — the analyzer maps it to a Type. `nullable` defaults to true;
+// `NOT NULL` flips it to false.
+struct ColumnDef {
+    std::string name;
+    std::string type_name;
+    bool nullable = true;
+};
+
+// AST for `CREATE TABLE <name> (<col-def>{, <col-def>})`.
+struct CreateTableStmt {
+    std::string table;
+    std::vector<ColumnDef> columns;
+};
+
+// One literal cell in an INSERT VALUES list. Mirrors the WHERE pattern:
+// the parser stores the raw text plus enough flags for the analyzer to
+// pick the right typed Value. When `is_null` is true the other fields
+// are unused.
+struct InsertLiteral {
+    std::string text;
+    bool is_string = false;
+    bool is_null = false;
+};
+
+// AST for `INSERT INTO <name> [(<cols>)] VALUES (<lit>{,<lit>}){, (...)}`.
+// `columns` is empty when the user omitted the column list, meaning
+// "values are in schema column order"; otherwise it lists the explicit
+// target columns in source order. `rows` is non-empty (the parser
+// rejects a trailing VALUES with no row).
+struct InsertStmt {
+    std::string table;
+    std::vector<std::string> columns;
+    std::vector<std::vector<InsertLiteral>> rows;
+};
+
+// A parsed top-level SQL statement. The parser dispatches on the first
+// keyword and produces exactly one of these alternatives.
+using Statement = std::variant<SelectQuery, CreateTableStmt, InsertStmt>;
+
+// Parses a single SQL statement from a SQL string.
+// Construction tokenizes; parse() walks the tokens to produce a Statement.
 // Throws std::runtime_error on any lex or parse error.
 class Parser {
 public:
     explicit Parser(std::string sql);
-    SelectQuery parse();
+    Statement parse();
 
 private:
-    // Token kinds the lexer emits. Keywords (Select/From/Where) are
-    // separated from generic Identifier so the parser can match on kind alone.
+    // Token kinds the lexer emits. Keywords are separated from generic
+    // Identifier so the parser can match on kind alone.
     enum class Tok {
         Select, From, Where, Join, On,
+        Create, Table, Insert, Into, Values,
+        Not, Null,
         Identifier, Number, String,
         Comma, Star, Dot, Op,
+        Lparen, Rparen,
         End
     };
 
@@ -77,7 +122,12 @@ private:
     const Token& consume();
     const Token& expect(Tok kind, const char* what);
 
-    // Grammar productions; each consumes tokens and writes into `q`.
+    // Top-level dispatch: SELECT / CREATE TABLE / INSERT.
+    SelectQuery     parseSelect();
+    CreateTableStmt parseCreateTable();
+    InsertStmt      parseInsert();
+
+    // SELECT sub-productions.
     void parseColumns(SelectQuery& q);
     void parseJoins(SelectQuery& q);
     void parseWhere(SelectQuery& q);
@@ -86,4 +136,12 @@ private:
     // the joined surface form (e.g. "id" or "users.id"). Used everywhere a
     // column may appear so qualified names work uniformly.
     std::string parseColumnRef();
+
+    // CREATE TABLE sub-productions.
+    ColumnDef parseColumnDef();
+
+    // INSERT sub-productions.
+    std::vector<std::string>   parseInsertColumnList();
+    std::vector<InsertLiteral> parseInsertRow();
+    InsertLiteral              parseInsertLiteral();
 };

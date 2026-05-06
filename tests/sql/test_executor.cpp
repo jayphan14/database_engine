@@ -84,7 +84,7 @@ void seedPosts(BufferPool& bp, const Catalog::TableInfo& info) {
 // Convenience: parse + analyze + execute in one shot.
 ExecResult run(const Catalog& cat, BufferPool& bp, const std::string& sql) {
     Parser p(sql);
-    SelectQuery q = p.parse();
+    SelectQuery q = std::get<SelectQuery>(p.parse());
     Analyzer az(cat);
     BoundSelect bs = az.analyze(q);
     Executor ex(&bp);
