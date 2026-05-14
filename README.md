@@ -199,8 +199,8 @@ twice in one query.
 
 ### What's not built yet
 
-- DML (`INSERT` / `UPDATE` / `DELETE`) at the SQL surface — rows are
-  inserted today via `HeapFile::insert` + `TupleCodec::encode`, not SQL.
+- `UPDATE` / `DELETE` at the SQL surface (`CREATE TABLE` and `INSERT`
+  are wired through Parser → Analyzer → Executor — see `grammar.md`).
 - `ORDER BY`, `LIMIT`, aggregates, expressions in the SELECT list, and
   table aliases.
 - Alternative operators (`HashJoin`, `IndexScan`, ...) and a real
@@ -233,11 +233,12 @@ Run the demo (`main.cpp`):
 
 `main.cpp` is one end-to-end flow that exercises every layer:
 
-1. open a fresh database file, create the catalog, declare a `users` and
-   a `posts` table;
-2. seed both tables (5 rows each) via `TupleCodec` + `HeapFile`, flush;
+1. open a fresh database file and bootstrap the catalog (system-table
+   pages 0/1);
+2. issue `CREATE TABLE` + multi-row `INSERT` for `users` and `posts`
+   through Parser → Analyzer → Executor; flush;
 3. *cold-reopen* the file with a brand-new `BufferPool` and `Catalog`;
-4. run a handful of SQL strings (including filters and a join)
+4. run a handful of SELECT strings (including filters and a join)
    through Parser → Analyzer → Planner → Executor and print each
    result as a padded table.
 
