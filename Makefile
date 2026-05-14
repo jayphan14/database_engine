@@ -17,6 +17,8 @@ DBMS_OBJS = $(BUILD_DIR)/main.o \
             $(BUILD_DIR)/src/sql/operators.o \
             $(BUILD_DIR)/src/sql/planner.o \
             $(BUILD_DIR)/src/sql/executor.o
+BENCH_OBJS = $(BUILD_DIR)/benchmark.o \
+             $(filter-out $(BUILD_DIR)/main.o,$(DBMS_OBJS))
 TEST_OBJS = $(BUILD_DIR)/tests/sql/test_parser.o \
             $(BUILD_DIR)/tests/storage/test_disk_manager.o \
             $(BUILD_DIR)/tests/storage/test_buffer_pool.o \
@@ -49,8 +51,14 @@ $(BUILD_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+benchmark: $(BENCH_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
 run: dbms
 	./dbms
+
+bench: benchmark
+	./benchmark
 
 test: $(BUILD_DIR)/run_tests
 	$<
@@ -60,6 +68,6 @@ $(BUILD_DIR)/run_tests: $(TEST_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 clean:
-	rm -rf $(BUILD_DIR) dbms
+	rm -rf $(BUILD_DIR) dbms benchmark
 
-.PHONY: run test clean
+.PHONY: run test bench clean
