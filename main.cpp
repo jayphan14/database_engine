@@ -15,9 +15,9 @@
 #include <vector>
 
 // =============================================================================
-// End-to-end demo: seed a small users + posts dataset via SQL, cold-reopen the
-// database, then run a handful of queries through Parser → Analyzer →
-// Executor and print the rows that come back.
+// End-to-end demo: run a CREATE TABLE, an INSERT, and a SELECT through
+// Parser → Analyzer → Executor against a fresh database to exercise the
+// full statement cycle.
 // =============================================================================
 
 namespace {
@@ -90,67 +90,29 @@ void runStatement(Catalog& cat, BufferPool& bp, const std::string& sql) {
     }
 }
 
-void seedFreshDatabase() {
+}  // namespace
+
+int main() {
     std::error_code ec;
     std::filesystem::remove(kDbPath, ec);
 
     DiskManager dm(kDbPath);
     BufferPool bp(8, &dm);
-    // Catalog::create still allocates the system-table bootstrap pages
-    // (__tables at page 0, __columns at page 1) — only user tables are
-    // built via SQL.
+    // Catalog::create allocates the system-table bootstrap pages
+    // (__tables at page 0, __columns at page 1) — user tables are
+    // built via SQL below.
     Catalog cat = Catalog::create(&bp);
 
     runStatement(cat, bp,
         "CREATE TABLE users (id INT NOT NULL, "
         "name TEXT NOT NULL, age INT NOT NULL)");
     runStatement(cat, bp,
-        "CREATE TABLE posts (id INT NOT NULL, "
-        "title TEXT NOT NULL, user_id INT NOT NULL)");
-
-    runStatement(cat, bp,
         "INSERT INTO users VALUES "
-        "(1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 40), "
-        "(4, 'dave', 19), (5, 'eve', 33)");
-    // The lexer has no string-escape handling, so titles avoid apostrophes
-    // — see grammar.md's "not yet supported" list.
-    runStatement(cat, bp,
-        "INSERT INTO posts VALUES "
-        "(100, 'hello world', 1), (101, 'second post', 1), "
-        "(102, 'musings of carol', 3), (103, 'eve at midnight', 5), "
-        "(104, 'silence from bob', 2)");
+        "(1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 40)");
+    runStatement(cat, bp, "SELECT * FROM users");
 
     bp.flushAll();
-    std::cout << "\n[seed] wrote users + posts to " << kDbPath
-              << " (" << std::filesystem::file_size(kDbPath) << " bytes)\n";
-}
 
-}  // namespace
-
-int main() {
-    seedFreshDatabase();
-
-    // Cold reopen — nothing is shared with the seeding phase except the file.
-    DiskManager dm(kDbPath);
-    BufferPool bp(8, &dm);
-    Catalog cat(&bp);
-
-    std::cout << "\n[query] reopened db; tables:";
-    for (const auto& n : cat.tableNames()) std::cout << " " << n;
-    std::cout << "\n";
-
-    runStatement(cat, bp, "SELECT * FROM users");
-    runStatement(cat, bp, "SELECT name, age FROM users WHERE age > 25");
-    runStatement(cat, bp, "SELECT name FROM users WHERE name = 'alice'");
-    runStatement(cat, bp,
-        "SELECT users.name, posts.title "
-        "FROM users JOIN posts ON users.id = posts.user_id");
-    runStatement(cat, bp,
-        "SELECT users.name, posts.title "
-        "FROM users JOIN posts ON users.id = posts.user_id "
-        "WHERE users.age > 25");
-
-    std::error_code ec;
     std::filesystem::remove(kDbPath, ec);
     return 0;
 }
