@@ -82,13 +82,23 @@ void seedPosts(BufferPool& bp, const Catalog::TableInfo& info) {
 }
 
 // Convenience: parse + analyze + execute in one shot.
-ExecResult run(const Catalog& cat, BufferPool& bp, const std::string& sql) {
+ExecResult run(Catalog& cat, BufferPool& bp, const std::string& sql) {
     Parser p(sql);
-    SelectQuery q = p.parse();
+    SelectQuery q = std::get<SelectQuery>(p.parse());
     Analyzer az(cat);
     BoundSelect bs = az.analyze(q);
-    Executor ex(&bp);
+    Executor ex(&bp, &cat);
     return ex.execute(std::move(bs));
+}
+
+// Variant of `run` that drives the analyzer's variant entry point — the
+// only path through which CREATE TABLE / INSERT can reach the executor.
+ExecResult runStatement(Catalog& cat, BufferPool& bp, const std::string& sql) {
+    Parser p(sql);
+    Analyzer az(cat);
+    BoundStatement bound = az.analyzeStatement(p.parse());
+    Executor ex(&bp, &cat);
+    return ex.execute(std::move(bound));
 }
 
 std::vector<std::string> textCol(const ExecResult& r, size_t c) {
@@ -339,6 +349,141 @@ TEST_CASE("Three-table chained JOIN") {
     REQUIRE(r.rows.size() == 2);
     CHECK(i32Col(r, 0) == std::vector<int32_t>{1, 3});
     CHECK(i32Col(r, 1) == std::vector<int32_t>{100, 300});
+}
+
+// ---- CREATE TABLE / INSERT through the executor ------------------------
+
+TEST_CASE("CREATE TABLE adds the table to the catalog and SELECT sees it") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat = Catalog::create(&bp);
+
+    auto r = runStatement(cat, bp,
+        "CREATE TABLE t (a INT NOT NULL, b TEXT)");
+
+    CHECK(r.rows_affected == 0);
+    CHECK(r.rows.empty());
+    REQUIRE(cat.hasTable("t"));
+    const auto* info = cat.getTable("t");
+    REQUIRE(info != nullptr);
+    REQUIRE(info->schema.columns.size() == 2);
+    CHECK(info->schema.columns[0].name     == "a");
+    CHECK(info->schema.columns[0].type     == Type::Int32);
+    CHECK(info->schema.columns[0].nullable == false);
+    CHECK(info->schema.columns[1].name     == "b");
+    CHECK(info->schema.columns[1].type     == Type::Text);
+    CHECK(info->schema.columns[1].nullable == true);
+
+    // Empty SELECT works against the freshly-created table.
+    auto sel = run(cat, bp, "SELECT * FROM t");
+    CHECK(sel.rows.empty());
+    CHECK(sel.column_names == std::vector<std::string>{"a", "b"});
+}
+
+TEST_CASE("INSERT writes rows visible to a follow-up SELECT") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat = Catalog::create(&bp);
+
+    runStatement(cat, bp,
+        "CREATE TABLE users (id INT NOT NULL, name TEXT NOT NULL, age INT)");
+
+    auto ins = runStatement(cat, bp,
+        "INSERT INTO users VALUES "
+        "(1, 'alice', 30), (2, 'bob', NULL), (3, 'carol', 40)");
+    CHECK(ins.rows_affected == 3);
+    CHECK(ins.rows.empty());
+
+    auto sel = run(cat, bp, "SELECT id, name, age FROM users");
+    REQUIRE(sel.rows.size() == 3);
+    CHECK(sel.rows[0][0].i32  == 1);
+    CHECK(sel.rows[0][1].text == "alice");
+    CHECK(sel.rows[0][2].i32  == 30);
+    CHECK(sel.rows[1][0].i32  == 2);
+    CHECK(sel.rows[1][1].text == "bob");
+    CHECK(sel.rows[1][2].is_null);
+    CHECK(sel.rows[2][0].i32  == 3);
+    CHECK(sel.rows[2][1].text == "carol");
+}
+
+TEST_CASE("INSERT with explicit column list reorders into schema order on disk") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat = Catalog::create(&bp);
+
+    runStatement(cat, bp,
+        "CREATE TABLE t (id INT NOT NULL, name TEXT, score INT)");
+    runStatement(cat, bp,
+        "INSERT INTO t (score, id, name) VALUES (99, 1, 'alice')");
+
+    auto sel = run(cat, bp, "SELECT * FROM t");
+    REQUIRE(sel.rows.size() == 1);
+    CHECK(sel.rows[0][0].i32  == 1);        // id
+    CHECK(sel.rows[0][1].text == "alice");  // name
+    CHECK(sel.rows[0][2].i32  == 99);       // score
+}
+
+TEST_CASE("INSERT followed by WHERE and JOIN through full SQL") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat = Catalog::create(&bp);
+
+    runStatement(cat, bp,
+        "CREATE TABLE u (id INT NOT NULL, name TEXT NOT NULL)");
+    runStatement(cat, bp,
+        "CREATE TABLE p (uid INT NOT NULL, title TEXT NOT NULL)");
+    runStatement(cat, bp,
+        "INSERT INTO u VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    runStatement(cat, bp,
+        "INSERT INTO p VALUES (1, 'x'), (1, 'y'), (3, 'z')");
+
+    auto r = run(cat, bp,
+        "SELECT u.name, p.title FROM u JOIN p ON u.id = p.uid "
+        "WHERE u.id != 2");
+    CHECK(textCol(r, 0) == std::vector<std::string>{"a", "a", "c"});
+    CHECK(textCol(r, 1) == std::vector<std::string>{"x", "y", "z"});
+}
+
+TEST_CASE("CREATE TABLE on an existing name throws at the executor") {
+    TempFile tf;
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat = Catalog::create(&bp);
+
+    runStatement(cat, bp, "CREATE TABLE t (a INT)");
+    // The analyzer normally rejects this first. To exercise the
+    // executor's own catalog-level guard, build a BoundCreateTable by
+    // hand and invoke the per-statement primitive.
+    BoundCreateTable bct;
+    bct.name = "t";
+    bct.schema.columns.push_back({"a", Type::Int32, true});
+    Executor ex(&bp, &cat);
+    CHECK_THROWS_AS(ex.execute(std::move(bct)), std::runtime_error);
+}
+
+TEST_CASE("Cold reopen sees rows inserted via SQL in a previous session") {
+    TempFile tf;
+    {
+        DiskManager dm(tf.path());
+        BufferPool bp(8, &dm);
+        Catalog cat = Catalog::create(&bp);
+        runStatement(cat, bp,
+            "CREATE TABLE k (n INT NOT NULL, label TEXT NOT NULL)");
+        runStatement(cat, bp,
+            "INSERT INTO k VALUES (10, 'ten'), (20, 'twenty'), (30, 'thirty')");
+        bp.flushAll();
+    }
+
+    DiskManager dm(tf.path());
+    BufferPool bp(8, &dm);
+    Catalog cat(&bp);
+
+    auto r = run(cat, bp, "SELECT label FROM k WHERE n >= 20");
+    CHECK(textCol(r, 0) == std::vector<std::string>{"twenty", "thirty"});
 }
 
 TEST_CASE("Cold reopen: data seeded in one session is visible to a fresh executor") {

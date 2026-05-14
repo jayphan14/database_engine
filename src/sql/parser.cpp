@@ -1,5 +1,7 @@
 #include "parser.h"
 
+#include "src/util/string.h"
+
 #include <cctype>
 #include <stdexcept>
 #include <utility>
@@ -14,13 +16,6 @@ const char* opToString(Op op) {
         case Op::Geq: return ">=";
     }
     return "?";
-}
-
-// Used to fold keywords case-insensitively (so `select` and `SELECT` match).
-static std::string toUpper(const std::string& s) {
-    std::string out = s;
-    for (char& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-    return out;
 }
 
 // Tokenize as soon as constructed
@@ -48,12 +43,19 @@ void Parser::tokenize() {
             size_t start = i;
             while (i < n && isIdentCont(src_[i])) ++i;
             std::string word = src_.substr(start, i - start);
-            std::string upper = toUpper(word);
-            if (upper == "SELECT")      tokens_.push_back({Tok::Select, word, Op::Eq});
+            std::string upper = util::toUpper(word);
+            if      (upper == "SELECT") tokens_.push_back({Tok::Select, word, Op::Eq});
             else if (upper == "FROM")   tokens_.push_back({Tok::From,   word, Op::Eq});
             else if (upper == "WHERE")  tokens_.push_back({Tok::Where,  word, Op::Eq});
             else if (upper == "JOIN")   tokens_.push_back({Tok::Join,   word, Op::Eq});
             else if (upper == "ON")     tokens_.push_back({Tok::On,     word, Op::Eq});
+            else if (upper == "CREATE") tokens_.push_back({Tok::Create, word, Op::Eq});
+            else if (upper == "TABLE")  tokens_.push_back({Tok::Table,  word, Op::Eq});
+            else if (upper == "INSERT") tokens_.push_back({Tok::Insert, word, Op::Eq});
+            else if (upper == "INTO")   tokens_.push_back({Tok::Into,   word, Op::Eq});
+            else if (upper == "VALUES") tokens_.push_back({Tok::Values, word, Op::Eq});
+            else if (upper == "NOT")    tokens_.push_back({Tok::Not,    word, Op::Eq});
+            else if (upper == "NULL")   tokens_.push_back({Tok::Null,   word, Op::Eq});
             else                        tokens_.push_back({Tok::Identifier, word, Op::Eq});
             continue;
         }
@@ -79,9 +81,11 @@ void Parser::tokenize() {
         }
 
         // Single-char punctuation.
-        if (c == ',') { tokens_.push_back({Tok::Comma, ",", Op::Eq}); ++i; continue; }
-        if (c == '*') { tokens_.push_back({Tok::Star,  "*", Op::Eq}); ++i; continue; }
-        if (c == '.') { tokens_.push_back({Tok::Dot,   ".", Op::Eq}); ++i; continue; }
+        if (c == ',') { tokens_.push_back({Tok::Comma,  ",", Op::Eq}); ++i; continue; }
+        if (c == '*') { tokens_.push_back({Tok::Star,   "*", Op::Eq}); ++i; continue; }
+        if (c == '.') { tokens_.push_back({Tok::Dot,    ".", Op::Eq}); ++i; continue; }
+        if (c == '(') { tokens_.push_back({Tok::Lparen, "(", Op::Eq}); ++i; continue; }
+        if (c == ')') { tokens_.push_back({Tok::Rparen, ")", Op::Eq}); ++i; continue; }
 
         // Comparison operators. `<` and `>` may be 1 or 2 chars (`<` vs `<=`),
         // so peek ahead before committing to a length.
@@ -122,9 +126,25 @@ const Parser::Token& Parser::expect(Tok kind, const char* what) {
     return consume();
 }
 
-// Top-level production:
-//   SELECT <columns> FROM <table> {JOIN <table> ON <col> = <col>} [WHERE <condition>]
-SelectQuery Parser::parse() {
+// Top-level dispatch: SELECT / CREATE TABLE / INSERT INTO. The first
+// keyword picks the production; each sub-parser leaves the tokens
+// positioned just past its statement, and parse() rejects trailing input.
+Statement Parser::parse() {
+    Statement out;
+    switch (peek().kind) {
+        case Tok::Select: out = parseSelect();      break;
+        case Tok::Create: out = parseCreateTable(); break;
+        case Tok::Insert: out = parseInsert();      break;
+        default:
+            throw std::runtime_error(
+                "expected SELECT, CREATE, or INSERT at start of statement");
+    }
+    expect(Tok::End, "end of input");
+    return out;
+}
+
+// SELECT <columns> FROM <table> {JOIN <table> ON <col> = <col>} [WHERE <condition>]
+SelectQuery Parser::parseSelect() {
     SelectQuery q;
 
     expect(Tok::Select, "SELECT");
@@ -140,9 +160,6 @@ SelectQuery Parser::parse() {
         consume();
         parseWhere(q);
     }
-
-    // Reject trailing tokens — the whole input must be a single statement.
-    expect(Tok::End, "end of input");
     return q;
 }
 
@@ -217,4 +234,112 @@ void Parser::parseWhere(SelectQuery& q) {
     }
 
     q.where = c;
+}
+
+// CREATE TABLE <name> (<col-def>{, <col-def>})
+CreateTableStmt Parser::parseCreateTable() {
+    CreateTableStmt s;
+    expect(Tok::Create, "CREATE");
+    expect(Tok::Table,  "TABLE");
+    s.table = expect(Tok::Identifier, "table name").text;
+
+    expect(Tok::Lparen, "'(' before column list");
+    // At least one column is required.
+    s.columns.push_back(parseColumnDef());
+    while (peek().kind == Tok::Comma) {
+        consume();
+        s.columns.push_back(parseColumnDef());
+    }
+    expect(Tok::Rparen, "')' after column list");
+    return s;
+}
+
+// One CREATE TABLE column: <name> <type-keyword> [NOT NULL]
+// The type keyword tokenizes as Identifier; the analyzer maps the surface
+// text (e.g. "INT", "BIGINT") to a Type, mirroring how WHERE literals
+// stay as raw text until the analyzer types them.
+ColumnDef Parser::parseColumnDef() {
+    ColumnDef c;
+    c.name      = expect(Tok::Identifier, "column name").text;
+    c.type_name = expect(Tok::Identifier, "column type").text;
+
+    // Optional `NOT NULL`. NULL alone is not accepted as a constraint —
+    // columns are nullable by default, so writing it would only be noise.
+    if (peek().kind == Tok::Not) {
+        consume();
+        expect(Tok::Null, "NULL after NOT");
+        c.nullable = false;
+    }
+    return c;
+}
+
+// INSERT INTO <table> [(<col>{,<col>})] VALUES (<lit>{,<lit>}){, (...)}
+InsertStmt Parser::parseInsert() {
+    InsertStmt s;
+    expect(Tok::Insert, "INSERT");
+    expect(Tok::Into,   "INTO");
+    s.table = expect(Tok::Identifier, "table name").text;
+
+    // Optional column list. A bare `(` here means the user is naming target
+    // columns; otherwise we go straight to VALUES.
+    if (peek().kind == Tok::Lparen) {
+        s.columns = parseInsertColumnList();
+    }
+
+    expect(Tok::Values, "VALUES");
+    // At least one row is required.
+    s.rows.push_back(parseInsertRow());
+    while (peek().kind == Tok::Comma) {
+        consume();
+        s.rows.push_back(parseInsertRow());
+    }
+    return s;
+}
+
+// `(col{, col})` — used only for INSERT's optional target column list.
+// Only bare identifiers; qualified `t.c` form makes no sense for a target.
+std::vector<std::string> Parser::parseInsertColumnList() {
+    std::vector<std::string> out;
+    expect(Tok::Lparen, "'(' before INSERT column list");
+    out.push_back(expect(Tok::Identifier, "column name").text);
+    while (peek().kind == Tok::Comma) {
+        consume();
+        out.push_back(expect(Tok::Identifier, "column name").text);
+    }
+    expect(Tok::Rparen, "')' after INSERT column list");
+    return out;
+}
+
+// `(<lit>{, <lit>})` — one row of values for INSERT.
+std::vector<InsertLiteral> Parser::parseInsertRow() {
+    std::vector<InsertLiteral> out;
+    expect(Tok::Lparen, "'(' before VALUES row");
+    out.push_back(parseInsertLiteral());
+    while (peek().kind == Tok::Comma) {
+        consume();
+        out.push_back(parseInsertLiteral());
+    }
+    expect(Tok::Rparen, "')' after VALUES row");
+    return out;
+}
+
+// One literal cell: number, single-quoted string, or NULL keyword.
+InsertLiteral Parser::parseInsertLiteral() {
+    const Token& t = peek();
+    InsertLiteral lit;
+    if (t.kind == Tok::Number) {
+        lit.text = t.text;
+        consume();
+    } else if (t.kind == Tok::String) {
+        lit.text = t.text;
+        lit.is_string = true;
+        consume();
+    } else if (t.kind == Tok::Null) {
+        lit.is_null = true;
+        consume();
+    } else {
+        throw std::runtime_error(
+            "expected number, string, or NULL in VALUES");
+    }
+    return lit;
 }

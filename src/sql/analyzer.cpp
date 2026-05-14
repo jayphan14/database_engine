@@ -4,7 +4,10 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 
 Type resultTypeOf(const BoundExpr& e) {
     return std::visit(
@@ -221,4 +224,132 @@ BoundSelect Analyzer::analyze(const SelectQuery& q) const {
     }
 
     return out;
+}
+
+Value Analyzer::analyzeInsertCell(const InsertLiteral& lit,
+                                  const Column& col) const {
+    if (lit.is_null) {
+        if (!col.nullable) {
+            throw std::runtime_error(
+                "INSERT: NULL value for non-nullable column '" + col.name + "'");
+        }
+        return Value::Null(col.type);
+    }
+    // Reuse the WHERE literal pipeline: same parsing rules, same range
+    // checks. analyzeLiteral throws on type mismatch (e.g. string for an
+    // Int32 column) which is exactly the error we want here.
+    BoundLiteral bl = analyzeLiteral(lit.text, lit.is_string, col.type);
+    return std::move(bl.value);
+}
+
+BoundCreateTable Analyzer::analyze(const CreateTableStmt& s) const {
+    if (s.table.empty()) {
+        throw std::runtime_error("CREATE TABLE: empty table name");
+    }
+    if (cat_.hasTable(s.table)) {
+        throw std::runtime_error(
+            "CREATE TABLE: table '" + s.table + "' already exists");
+    }
+    if (s.columns.empty()) {
+        // The parser already rejects this, but reasserting here keeps
+        // the analyzer's preconditions self-contained.
+        throw std::runtime_error(
+            "CREATE TABLE: at least one column is required");
+    }
+
+    BoundCreateTable out;
+    out.name = s.table;
+    out.schema.columns.reserve(s.columns.size());
+
+    std::unordered_set<std::string> seen;
+    for (const auto& cd : s.columns) {
+        if (!seen.insert(cd.name).second) {
+            throw std::runtime_error(
+                "CREATE TABLE: duplicate column name '" + cd.name + "'");
+        }
+        out.schema.columns.push_back(
+            Column{cd.name, typeFromName(cd.type_name), cd.nullable});
+    }
+    return out;
+}
+
+BoundInsert Analyzer::analyze(const InsertStmt& s) const {
+    const Catalog::TableInfo* info = cat_.getTable(s.table);
+    if (info == nullptr) {
+        throw std::runtime_error("INSERT: no such table '" + s.table + "'");
+    }
+    const Schema& schema = info->schema;
+    const size_t  ncols  = schema.columns.size();
+
+    // Build a permutation over schema columns:
+    //   col_to_user_pos[c] = index into the user's row for schema column c,
+    //                       or kNotFound if the user didn't list that column.
+    // The default (no column list) is the identity mapping.
+    std::vector<size_t> col_to_user_pos(ncols, Schema::kNotFound);
+
+    if (s.columns.empty()) {
+        for (size_t c = 0; c < ncols; ++c) col_to_user_pos[c] = c;
+    } else {
+        std::unordered_set<std::string> seen;
+        for (size_t i = 0; i < s.columns.size(); ++i) {
+            const std::string& name = s.columns[i];
+            if (!seen.insert(name).second) {
+                throw std::runtime_error(
+                    "INSERT: column '" + name + "' listed more than once");
+            }
+            const size_t c = schema.indexOf(name);
+            if (c == Schema::kNotFound) {
+                throw std::runtime_error(
+                    "INSERT: no such column '" + name +
+                    "' in table '" + s.table + "'");
+            }
+            col_to_user_pos[c] = i;
+        }
+    }
+
+    // The user-side row width is what we validate each VALUES row against.
+    const size_t expected_user_n = s.columns.empty() ? ncols : s.columns.size();
+
+    BoundInsert out;
+    out.table = info;
+    out.rows.reserve(s.rows.size());
+
+    for (size_t r = 0; r < s.rows.size(); ++r) {
+        const auto& row = s.rows[r];
+        if (row.size() != expected_user_n) {
+            throw std::runtime_error(
+                "INSERT row " + std::to_string(r) +
+                ": " + std::to_string(row.size()) +
+                " values, expected " + std::to_string(expected_user_n));
+        }
+
+        std::vector<Value> values;
+        values.reserve(ncols);
+        for (size_t c = 0; c < ncols; ++c) {
+            const Column& col = schema.columns[c];
+            const size_t  pos = col_to_user_pos[c];
+            if (pos == Schema::kNotFound) {
+                // Column omitted from the INSERT column list — defaults
+                // to NULL, which only flies if the column is nullable.
+                if (!col.nullable) {
+                    throw std::runtime_error(
+                        "INSERT: column '" + col.name +
+                        "' is not nullable and no value was provided");
+                }
+                values.push_back(Value::Null(col.type));
+            } else {
+                values.push_back(analyzeInsertCell(row[pos], col));
+            }
+        }
+        out.rows.push_back(std::move(values));
+    }
+    return out;
+}
+
+BoundStatement Analyzer::analyzeStatement(const Statement& s) const {
+    return std::visit(
+        [this](const auto& alt) -> BoundStatement {
+            return this->analyze(alt);
+        },
+        s);
 }

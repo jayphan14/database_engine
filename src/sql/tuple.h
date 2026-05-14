@@ -64,6 +64,21 @@ inline bool operator!=(const Value& a, const Value& b) { return !(a == b); }
 int32_t typeToCode(Type t);
 Type    typeFromCode(int32_t c);
 
+// Map a SQL surface type keyword (e.g. "INT", "BIGINT", "TEXT") to a
+// Type. Case-insensitive. Throws std::runtime_error on anything we
+// don't recognise. Accepted spellings:
+//   INT / INTEGER  -> Int32
+//   BIGINT         -> Int64
+//   BOOL / BOOLEAN -> Bool
+//   TEXT           -> Text
+Type typeFromName(const std::string& name);
+
+// Render a Value to a short human-readable string. NULL shows as
+// "NULL"; Bool shows as "true" / "false"; Int32/Int64 use std::to_string;
+// Text is returned verbatim. Used by the demo and any future EXPLAIN /
+// REPL output. Not meant to be a round-trippable SQL literal.
+std::string valueToString(const Value& v);
+
 // Stateless codec converting a row of Values to/from the byte sequence
 // stored in a SlottedPage's tuple area. Layout:
 //

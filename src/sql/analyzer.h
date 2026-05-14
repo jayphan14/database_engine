@@ -77,6 +77,32 @@ struct BoundSelect {
     bool select_all = false;
 };
 
+// Bound CREATE TABLE: surface type names (e.g. "INT", "TEXT") have been
+// mapped to Type, and column names checked unique. The catalog is *not*
+// touched at bind time — the executor performs the actual creation, so
+// the analyzer also pre-checks that the table name is free.
+struct BoundCreateTable {
+    std::string name;
+    Schema      schema;
+};
+
+// Bound INSERT: every literal cell has been parsed into a typed Value
+// (NULL becomes Value::Null(col.type)). `rows` is in schema column
+// order — if the user wrote a column list, the analyzer has already
+// reordered each row and filled unspecified columns with NULL. Each
+// row has exactly `table->schema.columns.size()` values.
+struct BoundInsert {
+    const Catalog::TableInfo*       table;
+    std::vector<std::vector<Value>> rows;
+};
+
+// A bound (analyzed) top-level SQL statement. Mirrors `Statement` in
+// parser.h: each parser variant alternative maps to one bound variant
+// alternative.
+using BoundStatement = std::variant<BoundSelect,
+                                    BoundCreateTable,
+                                    BoundInsert>;
+
 // Walks a parsed SelectQuery against a Catalog, resolving every name and
 // type-checking every operator. Throws std::runtime_error on any name
 // resolution failure or type mismatch. Pure: no I/O of its own beyond the
@@ -85,7 +111,15 @@ class Analyzer {
 public:
     explicit Analyzer(const Catalog& cat) : cat_(cat) {}
 
-    BoundSelect analyze(const SelectQuery& q) const;
+    // Top-level entry: dispatches on the parser's variant alternative.
+    BoundStatement analyzeStatement(const Statement& s) const;
+
+    // Per-statement entry points. Overloaded so analyzeStatement can
+    // dispatch with a single visit, and so call sites that already know
+    // the statement kind (e.g. existing tests) can stay terse.
+    BoundSelect      analyze(const SelectQuery& q) const;
+    BoundCreateTable analyze(const CreateTableStmt& s) const;
+    BoundInsert      analyze(const InsertStmt& s) const;
 
 private:
     // Set of tables visible to expression resolution. For now, just the
@@ -102,6 +136,13 @@ private:
     BoundExpr      analyzeCondition(const Condition& c,
                                     const Scope& scope) const;
     Type           checkBinaryOp(Op op, Type lhs, Type rhs) const;
+
+    // Convert one INSERT cell against the column it lands in. Handles
+    // NULL specially (rejected when the column is non-nullable); for
+    // non-NULL it delegates to analyzeLiteral. Type-name resolution
+    // for CREATE TABLE lives in tuple.h's free `typeFromName`.
+    Value analyzeInsertCell(const InsertLiteral& lit,
+                            const Column& col) const;
 
     const Catalog& cat_;
 };

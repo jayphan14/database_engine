@@ -1,5 +1,7 @@
 #include "src/sql/tuple.h"
 
+#include "src/util/string.h"
+
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -96,6 +98,29 @@ Type typeFromCode(int32_t c) {
             throw std::runtime_error("typeFromCode: invalid type code " +
                                      std::to_string(c));
     }
+}
+
+Type typeFromName(const std::string& name) {
+    const std::string up = util::toUpper(name);
+    if (up == "INT" || up == "INTEGER")  return Type::Int32;
+    if (up == "BIGINT")                  return Type::Int64;
+    if (up == "BOOL" || up == "BOOLEAN") return Type::Bool;
+    if (up == "TEXT")                    return Type::Text;
+    throw std::runtime_error("unknown column type: '" + name + "'");
+}
+
+std::string valueToString(const Value& v) {
+    if (v.is_null) return "NULL";
+    switch (v.type) {
+        case Type::Int32: return std::to_string(v.i32);
+        case Type::Int64: return std::to_string(v.i64);
+        case Type::Bool:  return v.b ? "true" : "false";
+        case Type::Text:  return v.text;
+    }
+    // Unreachable: the switch above is exhaustive over Type. Keeping a
+    // throw rather than a fallback string so a future Type addition
+    // surfaces as an immediate failure rather than a silent "<?>".
+    throw std::runtime_error("valueToString: unknown Type");
 }
 
 bool operator==(const Value& a, const Value& b) {
